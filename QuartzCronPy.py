@@ -18,7 +18,14 @@ class QuartzCronPy:
 		if endDate is None:
 			self.endDate = self.startDate.replace(year = self.startDate.year + 5)
 		self.splitCronExpression = cronExpression.split(' ')
-		self.executionsTable = self.buildExecutionsTable()
+		self.seconds = None
+		self.minutes = None
+		self.hours = None
+		self.dates = None
+		#self.executionsTable = self.buildExecutionsTable()
+		self.buildExecutionsTable()
+
+		self.nextExecutionGenerator = self.executionGenerator()
 
 		self.currentExecution = None
 		self.currentExecutionIndex = None
@@ -26,17 +33,113 @@ class QuartzCronPy:
 	#Return None if there is no farther execution with the time frame specified
 	#else return the next exectuion in the exectution table 
 	def getNextTrigger(self):
-		if self.currentExecution is None:
-			if len(self.executionsTable) > 0:
-				self.currentExecutionIndex = 0
-				self.currentExecution = self.executionsTable[self.currentExecutionIndex]
-		else:
-			if len(self.executionsTable) > self.currentExecutionIndex+1:
-				self.currentExecutionIndex += 1 
-				self.currentExecution = self.executionsTable[self.currentExecutionIndex]
+		try:
+			return next(self.nextExecutionGenerator)
+		except Exception as e:
+			#In this case we have reached the end of iteration and should be returning None
+			return None
+
+	#Return None if there is no farther execution with the time frame specified
+	#else return the next exectuion in the exectution table 
+	def executionGenerator(self):
+		for date in self.dates:
+			runDay = parse(date)
+			runDay = runDay.date()
+			compareDate = self.startDate
+			compareDate = compareDate.date()
+			endDate = self.endDate
+			endDate = endDate.date()
+			if runDay < compareDate or runDay > endDate:
+				continue
+			for hour in self.hours:
+				executionTime = date +' '+str(hour)+':0:0'
+				parsed = parse(executionTime)
+				truncatedStart = self.startDate.replace(minute=0, second=0, microsecond=0)
+				if parsed < truncatedStart:
+					continue 
+				for minute in self.minutes:
+					executionTime = date +' '+str(hour)+':'+str(minute)+':0'
+					parsed = parse(executionTime)
+					truncatedStart = self.startDate.replace(second=0, microsecond=0)
+					if parsed < truncatedStart:
+						continue 
+					for second in self.seconds:
+						if minute < 10:
+							if second < 10:
+								executionDateTime = date+' '+str(hour)+':0'+str(minute)+':0'+str(second)
+							else:
+								executionDateTime = date+' '+str(hour)+':0'+str(minute)+':'+str(second)
+						else:
+							if second < 10:
+								executionDateTime = date+' '+str(hour)+':'+str(minute)+':0'+str(second)
+							else:
+								executionDateTime = date+' '+str(hour)+':'+str(minute)+':'+str(second)
+						runDay = parse(executionDateTime)
+						if runDay < self.startDate:
+							continue
+						else:
+							yield(executionDateTime)
+
+	def generateAllExecutions(self):
+		minuteSeconds = []
+		for minute in self.minutes:
+			for second in self.seconds:
+				time = str(minute)+':'+str(second)
+				minuteSeconds.append(time)
+		times = []
+		for hour in self.hours:
+			for val in minuteSeconds:
+				time = str(hour)+':'+val
+				times.append(time)
+
+		datetimes = []
+		for date in self.dates:
+			compareDate = self.startDate
+			compareDate = compareDate.date()
+			parsed = parse(date)
+			parsed = parsed.date()
+			if parsed < compareDate:
+				continue
+			for time in times:
+				datetime = date+' '+time
+				datetimes.append(datetime)
+		datetimes = self.trimBadDates(datetimes)
+		return datetimes
+
+	#We know that there are possibly some execution times generated taht are before the start date
+	#Finding these is increadibly slow by just checking all as we would have to convert each to a 
+	#datetime.  This function uses a binary search to find the first valid execution and trims off
+	#all others.
+	def trimBadDates(self, datetimes):
+		numberOfDates = len(datetimes)
+		startIndex = 0
+		endIndex = numberOfDates -1
+		midPoint = numberOfDates//2
+		found = False
+		prevMidPoint = None
+		count = 0
+		while startIndex!= endIndex:
+			midPointDate = parse(datetimes[midPoint])
+			if midPointDate > self.startDate:
+				endIndex = midPoint
+			elif midPointDate < self.startDate:
+				startIndex = midPoint
+			#Then midPoint = the start Date and we know the correct value is the next index
 			else:
-				return None
-		return self.currentExecution
+				startIndex = midPoint + 1
+				endIndex = startIndex
+			prevMidPoint = midPoint
+			midPoint = ((endIndex-startIndex)//2)+startIndex
+			if prevMidPoint == midPoint:
+				prevDate = parse(datetimes[midPoint-1])
+				nextDate = parse(datetimes[midPoint+1])
+				if midPointDate < self.startDate:
+					return datetimes[midPoint+1:]
+				else:
+					return datetimes[midPoint:]
+
+		return datetimes[startIndex:]
+
 
 	def buildExecutionsTable(self):
 		secondsExpression = self.splitCronExpression[0]
@@ -54,19 +157,17 @@ class QuartzCronPy:
 			expression = self.splitCronExpression[6]
 
 		possibleExecutionYears = self.getExecutionYears(expression)
-		#print(possibleExecutionYears)
 
 		possibleExecutionSeconds = self.getMinuteOrSecondExecutionValues(secondsExpression)
-		#print(possibleExecutionSeconds)
+		self.seconds = possibleExecutionSeconds
 
 		possibleExecutionMinutes = self.getMinuteOrSecondExecutionValues(minutesExpression)
-		#print(possibleExecutionMinutes)
+		self.minutes = possibleExecutionMinutes
 
 		possibleExecutionHours = self.getHourExecutionValues(hoursExpression)
-		#print(possibleExecutionHours)
+		self.hours = possibleExecutionHours
 
 		possibleExecutionMonths = self.getMonthExecutionValues(monthExpression)
-		#print(possibleExecutionMonths)
 
 		executionDates = None
 
@@ -77,38 +178,9 @@ class QuartzCronPy:
 		else:
 			#get execution dates based off of day of month expression
 			executionDates = self.calculateDatesByDayOfMonth(dayOfMonthExpression, possibleExecutionMonths, possibleExecutionYears)
-		#print(executionDates)
 
-		executionDateTimes = self.buildExecutionDateTimes(executionDates, possibleExecutionSeconds, possibleExecutionMinutes, possibleExecutionHours)
+		self.dates = executionDates
 
-		#print(executionDateTimes)
-		return executionDateTimes
-
-	def buildExecutionDateTimes(self, executionDates, seconds, minutes, hours):
-		executionDateTimes = []
-		count = 0
-		for date in executionDates:
-			runDay = parse(date)
-			if runDay < self.startDate:
-				continue
-			for hour in hours:
-				for minute in minutes:
-					for second in seconds:
-						#print(count)
-						executionDateTime = date+' '+str(hour)+':'+str(minute)+':'+str(second)
-						edtAsDatetime = parse(executionDateTime)
-						if edtAsDatetime>=self.startDate and edtAsDatetime <= self.endDate:
-							executionDateTimes.append(executionDateTime)
-							count += 1
-						if count == 1000:
-							break
-					if count == 1000:
-						break
-				if count == 1000:
-					break
-			if count == 1000:
-				break
-		return executionDateTimes
 
 	def calculateDatesByDayOfWeek(self, expression, months, years):
 		executionDates = []
@@ -664,7 +736,6 @@ class QuartzCronPy:
 			splitExpression1 = expression.split('/')
 			splitExpression2 = splitExpression1[0].split('-')
 			startVal = splitExpression2[0]
-			#print('startval is: '+startVal)
 			if startVal in monthCharReplacement:
 				startVal = monthCharReplacement[startVal]
 			else:
@@ -682,9 +753,7 @@ class QuartzCronPy:
 
 		elif '-' in expression:
 			splitExpression = expression.split('-')
-			#splitExpression2 = splitExpression1[0].split('-')
 			startVal = splitExpression[0]
-			#print('startval is: '+startVal)
 			if startVal in monthCharReplacement:
 				startVal = monthCharReplacement[startVal]
 			else:
